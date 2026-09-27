@@ -9,7 +9,88 @@ Data sources (all free, no API key or account):
 - **In-person decklists:** the [Limitless One Piece website](https://onepiece.limitlesstcg.com/tournaments), for official Regionals, Treasure Cups and Championship Finals. It has no API, so the tool reads the pages: one request per second, and each finished event is fetched only once. Only the top ~16 lists per event are published.
 - **Card stats:** [OPTCG API](https://optcgapi.com)
 
-## Setup (once)
+## Quick start
+
+You don't need to know how to code. You'll type a few commands into a terminal window.
+
+### 1. Install Python (once)
+
+Download it from [python.org/downloads](https://www.python.org/downloads/) (version 3.10 or newer).
+**On Windows, tick "Add python.exe to PATH"** at the bottom of the first install screen.
+
+### 2. Download this tool (once)
+
+Click the green **Code** button at the top of this page, then **Download ZIP**, and unzip it
+somewhere easy to find, like your Documents folder.
+(If you use git: `git clone https://github.com/chunisama/optcg-deck-analyzer.git`)
+
+### 3. Set it up (once)
+
+Open a terminal **in the tool's folder**:
+- **Windows:** open the folder in File Explorer, click the address bar, type `cmd` and press Enter.
+- **Mac:** right-click the folder in Finder → **New Terminal at Folder**.
+
+Then copy and paste these two lines, pressing Enter after each:
+
+| Windows | Mac / Linux |
+|---|---|
+| `python -m venv .venv` | `python3 -m venv .venv` |
+| `.venv\Scripts\pip install -r requirements.txt` | `.venv/bin/pip install -r requirements.txt` |
+
+### 4. Make a report
+
+In the same terminal, type:
+
+| Windows | Mac / Linux |
+|---|---|
+| `optcg analyze` | `./optcg analyze` |
+
+**The first time takes 10–15 minutes** because it downloads every tournament since 2023.
+Leave the window open; you'll see it working through the events. After that, it takes a few seconds.
+
+When it says `Wrote ... to reports/optcg_<date>.xlsx`, open the **reports** folder and
+double-click the file to open it in Excel.
+
+### 5. Read the report
+
+Start with these tabs at the bottom of Excel:
+
+| Tab | Use it to... |
+|---|---|
+| **Leaders** | Compare leaders at a glance: average bricks, counters, searchers, events and cost curve per set |
+| **Card Usage** | See what a leader's top decks play: cards at 100% are the core, lower % are flex slots |
+| **Decklists** | See any single deck card by card. Use the filter arrow on **Player** or **Tournament** |
+| **Decks** | One row per deck with all its numbers; sort by any column |
+| **Sets** | What's included: which sets, date ranges and how many tournaments |
+
+Every tab has filter arrows in the header row. Filter **Set** to e.g. `OP17`, and **Source**
+to `Sim` (online ChinoizeCups) or `In-person` (Regionals, Treasure Cups, Championships).
+
+### Common requests
+
+Same terminal, same folder. On Mac/Linux, put `./` before `optcg`.
+
+| I want... | Type |
+|---|---|
+| Only the current set | `optcg analyze --set current` |
+| A specific set | `optcg analyze --set OP16` |
+| Only online, or only in-person | `optcg analyze --source sim` / `--source in-person` |
+| One leader | `optcg analyze --leader "Mihawk"` |
+| Every player, not just the top 8 | `optcg analyze --top 0` |
+| To check my own deck | Export it from OPTCGSim into a text file, then `optcg deck mydeck.txt` |
+
+To come back later: open a terminal in the folder again (step 3's first bullet) and run step 4.
+Only new tournaments are downloaded.
+
+**Something went wrong?**
+- *"python is not recognized"*: reinstall Python and tick "Add python.exe to PATH".
+- *"optcg is not recognized"*: your terminal isn't in the tool's folder. Redo step 3's first bullet.
+- *"Rate limited, waiting…"*: that's normal. The tool waits and continues by itself.
+- *Stopped halfway, or you closed the window?* Just run it again. It continues where it left off.
+
+---
+
+## Setup details
 
 Needs Python 3.10 or newer.
 
@@ -29,7 +110,7 @@ python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 ```
 
-## Usage
+## Detailed usage
 
 Run the commands below from the project folder. On macOS/Linux/WSL, type `./optcg`.
 On Windows, type `optcg` (in PowerShell: `.\optcg`).
