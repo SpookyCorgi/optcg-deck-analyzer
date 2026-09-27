@@ -85,7 +85,7 @@ CREATE INDEX IF NOT EXISTS entry_leader ON entry(leader_id);
 # One row per deck with the headline numbers, for ad-hoc and trend queries.
 # Same definitions as analyze() below; cards missing from `card` are not counted.
 # Bump VIEW_VERSION whenever this changes so existing databases pick it up.
-VIEW_VERSION = "4"
+VIEW_VERSION = "5"
 VIEW = """
 DROP VIEW IF EXISTS deck_summary;
 CREATE VIEW deck_summary AS
@@ -93,7 +93,7 @@ SELECT e.id AS entry_id, t.source, t.site,
        CASE WHEN t.source = 'in-person' THEN t.set_tag ELSE
        (SELECT code FROM set_era s WHERE t.date >= s.start_date AND (s.end_date IS NULL OR t.date < s.end_date)) END AS set_code,
        t.date, t.format, t.name AS tournament, e.player, e.placing,
-       e.wins, e.losses, e.leader_id, e.leader_name,
+       e.wins, e.losses, e.leader_id, COALESCE(e.leader_name, (SELECT name FROM card WHERE id = e.leader_id)) AS leader_name,
        SUM(CASE WHEN c.type = 'Character' THEN dc.count ELSE 0 END) AS characters,
        SUM(CASE WHEN c.type = 'Event' THEN dc.count ELSE 0 END) AS events,
        SUM(CASE WHEN c.type = 'Stage' THEN dc.count ELSE 0 END) AS stages,
