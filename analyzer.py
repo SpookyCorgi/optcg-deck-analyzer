@@ -1,7 +1,8 @@
 """OPTCG deck analyzer.
 
 Pulls tournament decklists from Limitless (sim events through its API, in-person
-Regionals / Treasure Cups / Championships from its website) and card stats from
+Regionals / Treasure Cups / Championships from its website), recent in-person events
+Limitless hasn't posted yet from onepiecetopdecks.com, and card stats from
 OPTCG API into a local SQLite database, then writes a per-deck breakdown to an
 Excel workbook, grouped by source and set.
 """
@@ -26,6 +27,10 @@ LIMITLESS = "https://play.limitlesstcg.com/api"
 LIMITLESS_SITE = "https://onepiece.limitlesstcg.com"  # in-person events; no API, so we read the pages
 USER_AGENT = "optcg-deck-analyzer (+https://github.com/chunisama/optcg-deck-analyzer)"
 IN_PERSON_TYPES = ("Regional", "Treasure Cup", "Championship")  # official events, by name prefix
+# Limitless posts in-person results weeks late; onepiecetopdecks.com fills the gap for the newest sets.
+TOPDECKS_INDEX = "https://onepiecetopdecks.com/deck-list/"
+TOPDECKS_RECENT_PAGES = 2  # newest English set pages to read each sync; they keep being updated
+MATCH_DAYS = 2  # a Top Decks deck is a duplicate if Limitless has the same event/deck within this many days
 OPTCGAPI = "https://optcgapi.com/api"
 CARD_CACHE_MAX_AGE = timedelta(days=7)
 REQUEST_GAP = 1.0  # seconds between per-tournament requests, to stay under Limitless's rate limits
@@ -53,9 +58,11 @@ CREATE TABLE IF NOT EXISTS card (
 );
 -- source: 'sim' (Limitless API) or 'in-person' (Limitless website). set_tag: Limitless's
 -- official set for in-person events; sim events get their set from set_era instead.
+-- site: where the data came from, 'limitless' or 'onepiecetopdecks'.
 CREATE TABLE IF NOT EXISTS tournament (
     id TEXT PRIMARY KEY, name TEXT, date TEXT, format TEXT, players INTEGER,
-    complete INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'sim', set_tag TEXT
+    complete INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'sim', set_tag TEXT,
+    site TEXT NOT NULL DEFAULT 'limitless'
 );
 CREATE TABLE IF NOT EXISTS entry (
     id INTEGER PRIMARY KEY, tournament_id TEXT NOT NULL REFERENCES tournament(id),
@@ -78,11 +85,11 @@ CREATE INDEX IF NOT EXISTS entry_leader ON entry(leader_id);
 # One row per deck with the headline numbers, for ad-hoc and trend queries.
 # Same definitions as analyze() below; cards missing from `card` are not counted.
 # Bump VIEW_VERSION whenever this changes so existing databases pick it up.
-VIEW_VERSION = "3"
+VIEW_VERSION = "4"
 VIEW = """
 DROP VIEW IF EXISTS deck_summary;
 CREATE VIEW deck_summary AS
-SELECT e.id AS entry_id, t.source,
+SELECT e.id AS entry_id, t.source, t.site,
        CASE WHEN t.source = 'in-person' THEN t.set_tag ELSE
        (SELECT code FROM set_era s WHERE t.date >= s.start_date AND (s.end_date IS NULL OR t.date < s.end_date)) END AS set_code,
        t.date, t.format, t.name AS tournament, e.player, e.placing,
@@ -115,6 +122,8 @@ def connect():
     if cols and "source" not in cols:  # database from before in-person support
         db.execute("ALTER TABLE tournament ADD COLUMN source TEXT NOT NULL DEFAULT 'sim'")
         db.execute("ALTER TABLE tournament ADD COLUMN set_tag TEXT")
+    if cols and "site" not in cols:  # database from before onepiecetopdecks support
+        db.execute("ALTER TABLE tournament ADD COLUMN site TEXT NOT NULL DEFAULT 'limitless'")
     db.executescript(SCHEMA)
     row = db.execute("SELECT value FROM meta WHERE key = 'view_version'").fetchone()
     if not row or row["value"] != VIEW_VERSION:
@@ -219,7 +228,7 @@ def store_tournament(db, t, standings):
     with db:
         db.execute("DELETE FROM deck_card WHERE entry_id IN (SELECT id FROM entry WHERE tournament_id = ?)", (t["id"],))
         db.execute("DELETE FROM entry WHERE tournament_id = ?", (t["id"],))
-        db.execute("INSERT OR REPLACE INTO tournament VALUES (?,?,?,?,?,?,'sim',NULL)",
+        db.execute("INSERT OR REPLACE INTO tournament VALUES (?,?,?,?,?,?,'sim',NULL,'limitless')",
                    (t["id"], t["name"], t["date"], m.group(1) if m else None, t.get("players"), complete))
         for p in standings:
             deck = p.get("decklist")
@@ -257,6 +266,7 @@ def sync(db, args):
         sync_sim(db, args)
     if args.source in ("all", "in-person"):
         sync_in_person(db, args)
+        sync_topdecks(db)
 
 
 def sync_sim(db, args):
@@ -339,7 +349,7 @@ def sync_in_person(db, args):
         with db:
             db.execute("DELETE FROM deck_card WHERE entry_id IN (SELECT id FROM entry WHERE tournament_id = ?)", (e["id"],))
             db.execute("DELETE FROM entry WHERE tournament_id = ?", (e["id"],))
-            db.execute("INSERT OR REPLACE INTO tournament VALUES (?,?,?,NULL,?,?,'in-person',?)",
+            db.execute("INSERT OR REPLACE INTO tournament VALUES (?,?,?,NULL,?,?,'in-person',?,'limitless')",
                        (e["id"], e["name"], e["date"], e["players"], complete, e["set_tag"]))
             for placing, player, leader_id, counts in decks:
                 cur = db.execute(
@@ -349,6 +359,144 @@ def sync_in_person(db, args):
         if i < len(new):
             time.sleep(REQUEST_GAP)
     print(f"In-person: {len(new)} new/updated, {len(events) - len(new)} already in database.", file=sys.stderr)
+
+
+# ---------------------------------------------------------------- in-person (onepiecetopdecks.com)
+
+_TD_PAGE = re.compile(r'href="(https://onepiecetopdecks\.com/deck-list/english-[^"]*?op-?(\d{2})[^"]*)"')
+_TD_DECK = re.compile(r"(\d+)n([A-Z0-9]+-\d+)")
+_TD_PLACING = re.compile(r"^(?:T(\d+)|(\d+)(?:st|nd|rd|th))\b", re.I)
+_TD_RECORD = re.compile(r"\((\d+)-(\d+)(?:-(\d+))?\)")
+
+
+def topdecks_kind(label, host):
+    """Map the site's free-text event labels to our official event types, or None to skip."""
+    text = f"{label} {host}".lower()
+    if any(k in text for k in ("sim", "egb", "flame", "prerelease", "pre-release", "proxy", "3v3")):
+        return None  # sim events (we have those from Limitless) and side events
+    if "regional" in text:
+        return "Regional"
+    if label.upper().startswith("TC") or "treasure" in text:
+        return "Treasure Cup"
+    if any(k in text for k in ("final", "nats", "championship")):
+        return "Championship Finals"
+    return None  # store battles, shop events, leagues
+
+
+def parse_topdecks_page(page, skipped=None):
+    """Yield dicts for each official in-person deck in a onepiecetopdecks.com set page table.
+
+    Unreadable decks (truncated card lists, bad dates) are counted in skipped[0] instead.
+    """
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", page, re.S):
+        cells = [html.unescape(re.sub(r"<[^>]+>", " ", c)).strip() for c in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
+        if len(cells) < 11:
+            continue
+        code, date, country, player, placement, label, host = cells[0], cells[5], cells[6], cells[7], cells[8], cells[9], cells[10]
+        kind = topdecks_kind(label, host)
+        if not kind:
+            continue
+        cards = [(cid, int(n)) for n, cid in _TD_DECK.findall(code)]
+        try:
+            day = datetime.strptime(date, "%m/%d/%Y")
+        except ValueError:
+            day = None
+        if len(cards) < 2 or not day or sum(n for _, n in cards[1:]) != 50:
+            if skipped is not None:
+                skipped[0] += 1
+            continue
+        m = _TD_PLACING.match(placement)
+        rec = _TD_RECORD.search(placement)
+        counts = Counter()
+        for cid, n in cards[1:]:
+            counts[cid] += n
+        # Hosts are written inconsistently, e.g. "PlayTCG" and "PlayTCG(1021)"; the number is the player count.
+        size = re.search(r"\((\d{2,5})\)", f"{host} {label}")
+        venue = re.sub(r"\s*\(\d+\)", "", host or label).strip()
+        yield {"kind": kind, "date": day.strftime("%Y-%m-%dT00:00:00.000Z"), "country": country, "player": player or None,
+               "placing": int(m.group(1) or m.group(2)) if m else None,
+               "record": tuple(int(x or 0) for x in rec.groups()) if rec else None,
+               "players": int(size.group(1)) if size else None,
+               "event": f"{kind} - {venue} ({country})", "leader_id": cards[0][0], "counts": counts}
+
+
+def sync_topdecks(db):
+    index = _get(TOPDECKS_INDEX, json=False)
+    pages = sorted({(int(num), url) for url, num in _TD_PAGE.findall(index)}, reverse=True)[:TOPDECKS_RECENT_PAGES]
+    total, skipped = 0, [0]
+    for i, (num, url) in enumerate(pages):
+        time.sleep(REQUEST_GAP)
+        decks = list(parse_topdecks_page(_get(url, json=False), skipped))
+        set_tag = f"OP{num:02d}"
+        with db:  # replace everything from this page: the site edits and adds decks over time
+            ids = [r["id"] for r in db.execute("SELECT id FROM tournament WHERE site = 'onepiecetopdecks' AND set_tag = ?", (set_tag,))]
+            for tid in ids:
+                db.execute("DELETE FROM deck_card WHERE entry_id IN (SELECT id FROM entry WHERE tournament_id = ?)", (tid,))
+                db.execute("DELETE FROM entry WHERE tournament_id = ?", (tid,))
+                db.execute("DELETE FROM tournament WHERE id = ?", (tid,))
+            seen = defaultdict(list)  # event key -> [(day, tournament id)]
+            for d in sorted(decks, key=lambda d: d["date"]):
+                # Multi-day events list decks under different days; merge same-named events within MATCH_DAYS.
+                key = re.sub(r"[^a-z0-9]+", "-", d["event"].lower()).strip("-")
+                day = _date(d["date"])
+                tid = next((t for first, t in seen[key] if (day - first).days <= MATCH_DAYS), None)
+                if not tid:
+                    tid = f"td-{set_tag}-{d['date'][:10]}-{key}"
+                    seen[key].append((day, tid))
+                db.execute("INSERT OR IGNORE INTO tournament VALUES (?,?,?,NULL,NULL,1,'in-person',?,'onepiecetopdecks')",
+                           (tid, d["event"], d["date"], set_tag))
+                if d["players"]:
+                    db.execute("UPDATE tournament SET players = MAX(COALESCE(players, 0), ?) WHERE id = ?", (d["players"], tid))
+                w, l, t = d["record"] or (None, None, None)
+                cur = db.execute(
+                    "INSERT INTO entry (tournament_id, player, placing, wins, losses, ties, leader_id, leader_name) "
+                    "VALUES (?,?,?,?,?,?,?,NULL)", (tid, d["player"], d["placing"], w, l, t, d["leader_id"]))
+                db.executemany("INSERT INTO deck_card VALUES (?,?,?)",
+                               [(cur.lastrowid, cid, n) for cid, n in d["counts"].items()])
+        total += len(decks)
+    print(f"Top Decks: {total} official in-person decks from {', '.join(f'OP{n:02d}' for n, _ in pages)}"
+          + (f" ({skipped[0]} unreadable lists skipped)." if skipped[0] else "."), file=sys.stderr)
+
+
+def _norm(name):
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+def limitless_duplicates(db, rows):
+    """IDs of Top Decks entries that Limitless also has, so Limitless's copy is used instead.
+
+    A Top Decks event is a duplicate when Limitless has posted results for an event in the same
+    city within MATCH_DAYS, or when any of its decks matches a Limitless deck of the same event
+    type (same leader and player, within a day). The second rule catches events the site names
+    after the organizer, e.g. "NoHeroes" for Regional Bielefeld.
+    """
+    def kind(name):
+        return next((k for k in IN_PERSON_TYPES if name.startswith(k)), "")
+
+    td = [r for r in rows if r["site"] == "onepiecetopdecks"]
+    if not td:
+        return set()
+    events, decks = [], set()
+    for r in db.execute("""SELECT t.name, substr(t.date, 1, 10) AS d, e.leader_id, e.player FROM entry e
+                           JOIN tournament t ON t.id = e.tournament_id
+                           WHERE t.site = 'limitless' AND t.source = 'in-person' AND t.date >= ?""",
+                        (min(r["iso_date"] for r in td)[:10],)):
+        day = datetime.strptime(r["d"], "%Y-%m-%d")
+        city = r["name"].split(" ", 2)[-1] if r["name"].startswith("Treasure Cup") else r["name"].split(" ", 1)[-1]
+        city = city.replace("Finals ", "").split(",")[0].split()[0].lower()
+        events.append((day, city))
+        decks.add((r["d"], kind(r["name"]), r["leader_id"], _norm(r["player"])))
+    dup_events = set()
+    for r in td:
+        day = datetime.strptime(r["iso_date"][:10], "%Y-%m-%d")
+        name = r["tournament"].lower()
+        same_city = any(abs((day - d).days) <= MATCH_DAYS and len(city) >= 4 and city in name for d, city in events)
+        same_deck = _norm(r["player"]) and any(
+            ((day + timedelta(days=k)).strftime("%Y-%m-%d"), kind(r["tournament"]), r["leader_id"], _norm(r["player"])) in decks
+            for k in (-1, 0, 1))
+        if same_city or same_deck:
+            dup_events.add(r["tournament_id"])
+    return {r["id"] for r in td if r["tournament_id"] in dup_events}
 
 
 # ---------------------------------------------------------------- sets
@@ -396,7 +544,7 @@ def set_label(eras, date, fmt):
 
 def load_entries(db, args):
     eras = load_set_eras(db)
-    where, params = ["t.players >= ?"], [args.min_players]
+    where, params = ["(t.players >= ? OR t.players IS NULL)"], [args.min_players]  # Top Decks has no player counts
     if args.source != "all":
         where.append("t.source = ?")
         params.append(args.source)
@@ -417,15 +565,20 @@ def load_entries(db, args):
         where.append("(e.leader_name LIKE ? OR e.leader_id LIKE ?)")
         params += [f"%{args.leader}%"] * 2
     rows = db.execute(
-        "SELECT e.*, t.name AS tournament, t.date AS iso_date, t.format, t.source, t.set_tag FROM entry e "
+        "SELECT e.*, t.name AS tournament, t.date AS iso_date, t.format, t.source, t.set_tag, t.site FROM entry e "
         "JOIN tournament t ON t.id = e.tournament_id WHERE " + " AND ".join(where) +
         " ORDER BY t.date DESC, e.placing", params).fetchall()
 
     wanted_set = None
     if args.set and args.set.lower() != "all":
         wanted_set = eras[-1]["code"] if args.set.lower() == "current" and eras else args.set.upper()
+    dupes = limitless_duplicates(db, rows)
+    if dupes:
+        print(f"Using Limitless's copy of {len(dupes)} decks that onepiecetopdecks.com also lists.", file=sys.stderr)
     entries, ids = [], []
     for r in rows:
+        if r["id"] in dupes:
+            continue
         label = (r["set_tag"] or "?") if r["source"] == "in-person" else set_label(eras, r["iso_date"], r["format"])
         if wanted_set and label != wanted_set and not label.startswith(wanted_set + " "):
             continue
@@ -437,6 +590,7 @@ def load_entries(db, args):
             "player": r["player"], "placing": r["placing"],
             "record": f"{r['wins']}-{r['losses']}-{r['ties']}" if r["wins"] is not None else "",
             "tournament": r["tournament"], "date": r["iso_date"][:10],
+            "site": "onepiecetopdecks.com" if r["site"] == "onepiecetopdecks" else "Limitless",
         })
     counts = defaultdict(Counter)
     for chunk in range(0, len(ids), 500):
@@ -559,16 +713,18 @@ def write_workbook(entries, cards, out, eras=(), selection=""):
                    "EGB events are a separate format and listed on their own."])
         ws.append(["In-person: Regionals, Treasure Cups and Championship Finals from the Limitless website, using its "
                    "official set tag. Only the top ~16 decklists are published; 'From'/'To' are the first and last event dates."])
+        ws.append(["Limitless posts in-person results weeks late, so recent official events come from onepiecetopdecks.com "
+                   "(see 'Data from' on the Decks sheet). Once Limitless posts the same event, its copy is used instead."])
 
     # Decks: one row per decklist
-    header = ["Source", "Set", "Leader", "Player", "Placing", "Record", "Tournament", "Date"] + [c for c, _ in DECK_COLS] + COST_COLS + ["Unknown cards"]
+    header = ["Source", "Set", "Leader", "Player", "Placing", "Record", "Tournament", "Date"] + [c for c, _ in DECK_COLS] + COST_COLS + ["Unknown cards", "Data from"]
     rows = [[e.get("source", ""), e.get("set", ""), e["leader_name"], e["player"], e["placing"], e["record"], e["tournament"], e["date"]]
-            + _deck_row(e["stats"], e["curve"]) + [", ".join(e["unknown"])] for e in entries]
+            + _deck_row(e["stats"], e["curve"]) + [", ".join(e["unknown"]), e.get("site", "")] for e in entries]
     _sheet(wb, "Decks", header, rows, {"Leader": 26, "Tournament": 34, "Player": 16}, freeze="D2")
 
     # Decklists: every card in every deck
     header = ["Source", "Set", "Date", "Tournament", "Placing", "Player", "Leader", "Card ID", "Card name", "Copies",
-              "Type", "Cost", "Counter", "Power", "Color", "Brick (no counter)", "Searcher", "[Counter] event"]
+              "Type", "Cost", "Counter", "Power", "Color", "Brick (no counter)", "Searcher", "[Counter] event", "Data from"]
     rows = []
     for e in entries:
         def order(item):
@@ -580,11 +736,12 @@ def write_workbook(entries, cards, out, eras=(), selection=""):
                 continue
             if not c:
                 rows.append([e.get("source", ""), e.get("set", ""), e["date"], e["tournament"], e["placing"], e["player"],
-                             e["leader_name"], cid, "(unknown card)", n] + [""] * 8)
+                             e["leader_name"], cid, "(unknown card)", n] + [""] * 8 + [e.get("site", "")])
                 continue
             rows.append([e.get("source", ""), e.get("set", ""), e["date"], e["tournament"], e["placing"], e["player"],
                          e["leader_name"], cid, c["name"], n, c["type"], c["cost"], c["counter"], c["power"], c["color"],
-                         _yes(c["counter"] == 0), _yes(c["on_play_searcher"] or c["event_searcher"]), _yes(c["counter_event"])])
+                         _yes(c["counter"] == 0), _yes(c["on_play_searcher"] or c["event_searcher"]), _yes(c["counter_event"]),
+                         e.get("site", "")])
     _sheet(wb, "Decklists", header, rows, {"Tournament": 34, "Leader": 26, "Player": 16, "Card name": 30}, freeze="I2")
 
     # Leaders: averages per set + leader
@@ -625,7 +782,8 @@ def write_workbook(entries, cards, out, eras=(), selection=""):
     defs = [
         ("Source", "Sim = ChinoizeCup on OPTCGSim (Limitless API, every player's list). In-person = official Regionals, Treasure Cups and Championship Finals (Limitless website, top ~16 lists only)."),
         ("Set", "Sim: which set was newest on the sim when the event was played; EGB events are labelled e.g. 'OP17 · EGB'. In-person: Limitless's official set tag, e.g. OP16 or OP14.5."),
-        ("Record", "Win-loss-tie. Only available for sim events."),
+        ("Record", "Win-loss-tie. Always there for sim events; for in-person, only when onepiecetopdecks.com lists it."),
+        ("Data from", "Limitless, or onepiecetopdecks.com for recent official events Limitless hasn't posted yet. Top Decks placings like 'T8' are stored as 8."),
         ("Bricks (no counter)", "Non-leader cards with no counter value (0 or blank). Includes all events and stages."),
         ("  of which [Counter] events", "Bricks that are events with a [Counter] effect, i.e. still usable on defense."),
         ("Cards w/ counter", "Non-leader cards with a +1000 or +2000 counter value."),
@@ -637,7 +795,10 @@ def write_workbook(entries, cards, out, eras=(), selection=""):
     _sheet(wb, "Definitions", ["Column", "Meaning"], defs, {"Column": 28, "Meaning": 110}, freeze="A2")
 
     out.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(out)
+    try:
+        wb.save(out)
+    except PermissionError:
+        sys.exit(f"Can't write {out}: it's probably open in Excel. Close it and run again, or use --out to pick another file name.")
 
 
 # ---------------------------------------------------------------- CLI

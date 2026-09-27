@@ -7,6 +7,7 @@ in a local SQLite database, so you can also track how the meta changes over time
 Data sources (all free, no API key or account):
 - **Sim decklists:** the [Limitless API](https://docs.limitlesstcg.com/developer.html), for ChinoizeCup events played on OPTCGSim. Includes every player's list and record.
 - **In-person decklists:** the [Limitless One Piece website](https://onepiece.limitlesstcg.com/tournaments), for official Regionals, Treasure Cups and Championship Finals. It has no API, so the tool reads the pages: one request per second, and each finished event is fetched only once. Only the top ~16 lists per event are published.
+- **Recent in-person decklists:** [onepiecetopdecks.com](https://onepiecetopdecks.com/deck-list/). Limitless often posts in-person results weeks late, so the tool also reads this site's two newest set pages (e.g. OP16 and OP17) to fill the gap. When both sites have the same event, Limitless's copy is used.
 - **Card stats:** [OPTCG API](https://optcgapi.com)
 
 ## Quick start
@@ -87,6 +88,7 @@ Only new tournaments are downloaded.
 - *"optcg is not recognized"*: your terminal isn't in the tool's folder. Redo step 3's first bullet.
 - *"Rate limited, waiting…"*: that's normal. The tool waits and continues by itself.
 - *Stopped halfway, or you closed the window?* Just run it again. It continues where it left off.
+- *"it's probably open in Excel"*: close the report in Excel first, then run again.
 
 ---
 
@@ -154,7 +156,9 @@ each run only downloads new tournaments.
 The tool doesn't pick or judge decks. It picks **tournaments**, then takes their published decklists:
 
 1. **Sim:** tournaments whose name contains `--event` (default `chinoize`). Every player's registered list is available.
-   **In-person:** every Regional, Treasure Cup and Championship Finals listed on Limitless. Only the top ~16 lists are published.
+   **In-person:** every Regional, Treasure Cup and Championship Finals with results on Limitless (top ~16 lists each), plus
+   recent ones Limitless hasn't posted yet from onepiecetopdecks.com (usually the top 4–16). Store events, pre-releases
+   and side events are left out.
 2. Both need at least `--min-players` (16) players.
 3. From those, players who placed `--top` 8 or better (1st–8th; sim ties can add a few extra).
 4. Optionally narrowed to one `--source`, `--set`, `--leader` or recent `--days`.
@@ -188,7 +192,7 @@ The **Sets** sheet in the report shows exactly which sets, date ranges and how m
 | Sheet | Contents |
 |---|---|
 | **Sets** | Which sets the report covers: date range, tournaments and decks per set |
-| **Decks** | One row per decklist: set, placing, record, character/event/stage counts, bricks, counter cards (+1k/+2k), searchers, and cards at each cost 0–10+ |
+| **Decks** | One row per decklist: set, placing, record, which site it came from, character/event/stage counts, bricks, counter cards (+1k/+2k), searchers, and cards at each cost 0–10+ |
 | **Decklists** | Every card in every deck: card ID, name, copies, type, cost, counter, power, color, and brick/searcher flags. Filter by player or tournament to see a full list. |
 | **Leaders** | The same columns as Decks, averaged per set and leader |
 | **Card Usage** | Per set and leader: every card played, % of decks running it, average copies (core vs. flex) |
@@ -245,8 +249,8 @@ The database is local to each person and isn't committed. Delete `data/optcg.db`
 
 All the code is in `analyzer.py`. The only dependencies are `requests` and `openpyxl`.
 
-If Limitless changes its website layout, the in-person part may stop finding decklists
-until `analyzer.py` is updated. The sim part uses the API and isn't affected.
+If Limitless or onepiecetopdecks.com change their website layout, the in-person part may stop
+finding decklists until `analyzer.py` is updated. The sim part uses the API and isn't affected.
 
 ## License
 
