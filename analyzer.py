@@ -900,7 +900,7 @@ def main():
     a = sub.add_parser("analyze", help="sync, then write an Excel report from the database")
     _filters(a)
     a.add_argument("--set", default="all", help="all (default), current, or a set code like OP16")
-    a.add_argument("--top", type=int, default=8, help="only decks that placed this or better (default 8; 0 = everyone)")
+    a.add_argument("--top", type=int, default=64, help="only decks that placed this or better (default 64; 0 = everyone)")
     a.add_argument("--leader", help="only include this leader (name or card ID, partial match)")
     a.add_argument("--out", help="output .xlsx path (default reports/optcg_<date>.xlsx)")
     a.add_argument("--no-sync", action="store_true", help="use only what's already in the database (works offline)")

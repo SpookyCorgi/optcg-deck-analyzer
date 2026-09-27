@@ -77,7 +77,7 @@ Same terminal, same folder. On Mac/Linux, put `./` before `optcg`.
 | A specific set | `optcg analyze --set OP16` |
 | Only online, or only in-person | `optcg analyze --source sim` / `--source in-person` |
 | One leader | `optcg analyze --leader "Mihawk"` |
-| Every player, not just the top 8 | `optcg analyze --top 0` |
+| Every player, not just the top 64 | `optcg analyze --top 0` |
 | To check my own deck | Export it from OPTCGSim into a text file, then `optcg deck mydeck.txt` |
 
 To come back later: open a terminal in the folder again (step 3's first bullet) and run step 4.
@@ -118,7 +118,7 @@ Run the commands below from the project folder. On macOS/Linux/WSL, type `./optc
 On Windows, type `optcg` (in PowerShell: `.\optcg`).
 
 ```bash
-# Top-8 decks from every ChinoizeCup and official in-person event, grouped by set
+# Top-64 decks from every ChinoizeCup and official in-person event, grouped by set
 ./optcg analyze
 
 # Only sim or only in-person events
@@ -129,7 +129,7 @@ On Windows, type `optcg` (in PowerShell: `.\optcg`).
 ./optcg analyze --set current
 ./optcg analyze --set OP16
 
-# Every player instead of just the top 8
+# Every player instead of just the top 64
 ./optcg analyze --set current --top 0
 
 # One leader, custom output file
@@ -160,7 +160,7 @@ The tool doesn't pick or judge decks. It picks **tournaments**, then takes their
    recent ones Limitless hasn't posted yet from onepiecetopdecks.com (usually the top 4–16). Store events, pre-releases
    and side events are left out.
 2. Both need at least `--min-players` (16) players.
-3. From those, players who placed `--top` 8 or better (1st–8th; sim ties can add a few extra).
+3. From those, players who placed `--top` 64 or better (1st–64th; sim ties can add a few extra).
 4. Optionally narrowed to one `--source`, `--set`, `--leader` or recent `--days`.
 
 The **Sets** sheet in the report shows exactly which sets, date ranges and how many tournaments were included.
@@ -179,7 +179,7 @@ The **Sets** sheet in the report shows exactly which sets, date ranges and how m
 | `--min-players` | 16 | Skip smaller events |
 | `--source` | `all` | `sim`, `in-person` or `all` |
 | `--set` | `all` | *(analyze only)* `all`, `current`, or a set code like `OP16` |
-| `--top` | 8 | *(analyze only)* Only decks that placed this or better; `0` = every player |
+| `--top` | 64 | *(analyze only)* Only decks that placed this or better; `0` = every player |
 | `--leader` | all | *(analyze only)* Leader name or card ID, partial match |
 | `--out` | `reports/optcg_<date>.xlsx` | *(analyze only)* Output file |
 | `--no-sync` | off | *(analyze only)* Report from the database without downloading (works offline) |
