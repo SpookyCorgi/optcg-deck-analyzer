@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Wrapper so the tool runs as ./optcg without activating the venv.
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$DIR/.venv/bin/python" "$DIR/analyzer.py" "$@"
